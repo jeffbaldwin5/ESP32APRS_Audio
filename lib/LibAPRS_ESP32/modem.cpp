@@ -96,6 +96,7 @@ struct ModemDemodConfig ModemConfig;
 
 static uint8_t N;						 // samples per symbol
 static enum ModemTxTestMode txTestState; // current TX test mode
+extern volatile bool hw_afsk_dac_isr;
 static uint8_t demodCount;				 // actual number of parallel demodulators
 // static uint16_t dacSine[DAC_SINE_SIZE];										   // sine samples for DAC
 static uint8_t dacSineIdx;													   // current sine sample index
@@ -384,7 +385,14 @@ uint8_t MODEM_BAUDRATE_TIMER_HANDLER(void)
 	// MODEM_LL_BAUDRATE_TIMER_CLEAR_INTERRUPT_FLAG();
 	if (sampleIndex == 0)
 	{
-		if (Ax25GetTxBit() == 0) // get next bit and check if it's 0
+		if (txTestState != TEST_DISABLED)
+		{
+			if (txTestState == TEST_ALTERNATING)
+				currentSymbol ^= 1;
+			else
+				currentSymbol = (txTestState == TEST_SPACE) ? 1 : 0;
+		}
+		else if (Ax25GetTxBit() == 0) // get next bit and check if it's 0
 		{
 			currentSymbol ^= 1; // change symbol - NRZI encoding
 		}
@@ -591,10 +599,13 @@ void ModemTxTestStart(enum ModemTxTestMode type)
 
 	setPtt(true); // PTT on
 	txTestState = type;
+	delay(50);
+	hw_afsk_dac_isr = true; // Same audio start-up as ModemTransmitStart()
+	AFSK_TimerEnable(false);
+	DAC_TimerEnable(true);
 }
 extern volatile int8_t adcEn;
 extern volatile int8_t dacEn;
-extern volatile bool hw_afsk_dac_isr;
 extern volatile bool pttOff;
 extern void AFSK_FlushFifo(void);
 void ModemTxTestStop(void)

@@ -26,6 +26,17 @@
 #include "freertos/semphr.h"
 #include "driver/sigmadelta.h"
 
+// TX_TRUE_DAC: classic ESP32 only. Output TX audio on the 8-bit DAC at GPIO25
+// instead of sigma-delta on GPIO26, for wiring with no RC filter on the mic line.
+#if defined(TX_TRUE_DAC) && !defined(CONFIG_IDF_TARGET_ESP32)
+#error "TX_TRUE_DAC requires a classic ESP32"
+#endif
+#ifdef TX_TRUE_DAC
+#include "hal/dac_ll.h"
+#define TX_DAC_GPIO 25
+#define TX_DAC_MIDSCALE 128
+#endif
+
 #include "esp_dsp.h"
 #include <dsps_fir.h>
 #ifdef CONFIG_IDF_TARGET_ESP32C3
@@ -874,6 +885,9 @@ void setPtt(bool state)
   else
   {
     setTransmit(false);
+#ifdef TX_TRUE_DAC
+    dac_ll_update_output_value(DAC_CHAN_0, TX_DAC_MIDSCALE); // Park at mid-scale so unkey doesn't leave a DC step
+#endif
     // adcq.flush();
     if (_ptt_active)
     {
@@ -1230,6 +1244,10 @@ void adc_continue_init(void)
  */
 static void sigmadelta_init(void)
 {
+#ifdef TX_TRUE_DAC
+  dacWrite(TX_DAC_GPIO, TX_DAC_MIDSCALE); // Claims and powers the DAC; the ISR then writes it directly
+  return;
+#endif
   sigmadelta_config_t sigmadelta_cfg = {
       .channel = SIGMADELTA_CHANNEL_0,
       .sigmadelta_duty = 127,
@@ -1503,7 +1521,11 @@ void IRAM_ATTR sample_dac_isr()
     sinwave = MODEM_BAUDRATE_TIMER_HANDLER();
     // Sigma-delta duty of one channel, the value ranges from -128 to 127, recommended range is -90 ~ 90.The waveform is more like a random one in this range.
     int8_t sine = (int8_t)(((sinwave - 127) * 12) >> 4); // Redue sine = -85 ~ 85
+#ifdef TX_TRUE_DAC
+    dac_ll_update_output_value(DAC_CHAN_0, (uint8_t)(TX_DAC_MIDSCALE + sine)); // dacWrite() is not ISR safe
+#else
     sigmadelta_set_duty(SIGMADELTA_CHANNEL_0, sine);
+#endif
     portEXIT_CRITICAL_ISR(&timerMux); // ISR end
     // Give a semaphore that we can check in the loop
     // xSemaphoreGiveFromISR(timerSemaphore, NULL);

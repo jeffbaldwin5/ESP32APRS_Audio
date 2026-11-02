@@ -3448,6 +3448,12 @@ RTC_DATA_ATTR bool gps_mode;
 RTC_DATA_ATTR uint8_t curTab;
 int timeHalfSec = 0;
 #endif
+#ifdef EXTRA_BUTTONS
+#include "modem.h"
+#define BTN_TEST_MAX_MS 30000 // Unkey after this long, even if the button is stuck
+volatile bool manualBeaconReq = false;
+bool btnTestEnabled = true;
+#endif
 
 void preTransmission()
 {
@@ -3756,6 +3762,14 @@ void setup()
         }
     }
     LED_Status(0, 0, 0);
+
+#ifdef EXTRA_BUTTONS
+    pinMode(BTN_BEACON_PIN, INPUT_PULLUP);
+    pinMode(BTN_PREV_PIN, INPUT_PULLUP);
+    btnTestEnabled = !(config.rf_en && config.rf_pd_gpio == BTN_TEST_PIN); // Pin is the RF module's PD line
+    if (btnTestEnabled)
+        pinMode(BTN_TEST_PIN, INPUT_PULLUP);
+#endif
 
     // if (config.counter0_enable)
     // {
@@ -5222,7 +5236,66 @@ void msgBox(String msg)
 }
 #endif
 
+#ifdef EXTRA_BUTTONS
+// Called every loop() pass (about 10ms). Each history byte holds the last 8
+// samples, 1 = pressed, so three matching samples debounce the contact.
+static bool btnSample(uint8_t pin, uint8_t &history)
+{
+    history = (history << 1) | (digitalRead(pin) == LOW ? 1 : 0);
+    return (history & 0x0F) == 0x07; // Released, then held for three samples
+}
+
+static void handleExtraButtons()
+{
+    static uint8_t beaconHistory = 0, prevHistory = 0, testHistory = 0;
+    static unsigned long testToneEnd = 0;
+
+    if (btnSample(BTN_BEACON_PIN, beaconHistory))
+    {
+        bool beaconOn = config.trk_en || (config.igate_en && config.igate_bcn) ||
+                        ((config.digi_en || config.digi_auto) && config.digi_bcn);
+        showDisp = true;
+        timeSec = timeHalfSec = millis();
+        msgBox(beaconOn ? "MANUAL TX" : "NO BEACON SET");
+        if (beaconOn)
+            manualBeaconReq = true;
+    }
+
+    if (btnSample(BTN_PREV_PIN, prevHistory))
+    {
+        StandByTick = millis() + (config.pwr_stanby_delay * 1000);
+        if (save_mode)
+            save_act = true;
+        showDisp = true;
+        timeSec = timeHalfSec = millis();
+        curTab = (curTab == 0) ? 7 : curTab - 1;
+    }
+
+    if (btnTestEnabled)
+    {
+        bool testPressed = btnSample(BTN_TEST_PIN, testHistory);
+        if (!ModemIsTxTestOngoing())
+        {
+            // A press is needed to start, so a stuck button can't re-key after the timeout
+            if (testPressed && !getTransmit())
+            {
+                msgBox("TEST TONE");
+                ModemTxTestStart(TEST_ALTERNATING);
+                testToneEnd = millis() + BTN_TEST_MAX_MS;
+            }
+        }
+        else if ((testHistory & 0x07) == 0 || (long)(millis() - testToneEnd) >= 0)
+        {
+            ModemTxTestStop();
+            showDisp = true;
+            timeSec = timeHalfSec = millis();
+        }
+    }
+}
+#endif
+
 uint8_t heapCount = 0;
+static bool btnHeld = false;
 void loop()
 {
     if (millis() > timeTask)
@@ -5235,6 +5308,10 @@ void loop()
     }
 
     vTaskDelay(10 / portTICK_PERIOD_MS);
+
+#ifdef EXTRA_BUTTONS
+    handleExtraButtons();
+#endif
 
     // if (digitalRead(BOOT_PIN) == LOW)
     // {
@@ -5275,10 +5352,12 @@ void loop()
     #ifdef OLED
     if (digitalRead(BOOT_PIN) == LOW)
     {
-        btn_count++;
+        if (!btnHeld) // A long press fires once, then waits here for release without blocking loop()
+            btn_count++;
         if (btn_count > 200) // Push BOOT >2sec
         {
             btn_count = 0;
+            btnHeld = true;
             if (curTab == 0)
             {
                 showDisp = true;
@@ -5288,10 +5367,6 @@ void loop()
                 else
                     gps_mode = true;
                 msgBox("GPS SWAP");
-                while (digitalRead(BOOT_PIN) == LOW)
-                {
-                    delay(100);
-                }
             }
             else if (curTab == 4) // System display
             {
@@ -5320,18 +5395,10 @@ void loop()
                     msgBox("WiFi ON");
                     vTaskResume(taskNetworkHandle);
                 }
-                while (digitalRead(BOOT_PIN) == LOW)
-                {
-                    delay(100);
-                }
             }
             else if (curTab == 1) // Status display
             {
                 msgBox("MANUAL TX");
-                while (digitalRead(BOOT_PIN) == LOW)
-                {
-                    delay(100);
-                }
                 EVENT_TX_POSITION = 6;
                 tx_interval = config.trk_interval;
             }
@@ -5342,6 +5409,7 @@ void loop()
     }
     else
     {
+        btnHeld = false;
         if (btn_count > 0)
         {
             log_d("btn_count=%d", btn_count);
@@ -6642,6 +6710,18 @@ void taskAPRS(void *pvParameters)
         // wdtSensorTimer = now;
         // time_t timeStamp;
         // time(&timeStamp);
+#ifdef EXTRA_BUTTONS
+        if (manualBeaconReq)
+        { // Expire every beacon timer so each enabled mode sends now
+            manualBeaconReq = false;
+            iGatetickInterval = DiGiInterval = 0;
+            if (config.trk_en)
+            {
+                EVENT_TX_POSITION = 6;
+                tx_interval = config.trk_interval;
+            }
+        }
+#endif
         if (initInterval)
         {
             tickInterval = WxInterval = DiGiInterval = igateSTSInterval = iGatetickInterval = digiSTSInterval = trkSTSInterval = millis() + 10000;

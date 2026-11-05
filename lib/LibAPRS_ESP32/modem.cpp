@@ -612,8 +612,10 @@ void ModemTxTestStop(void)
 {
 	txTestState = TEST_DISABLED;
 
-	hw_afsk_dac_isr = false;
+	// Same order as ModemTransmitStop(), so RX restarts with an empty FIFO
 	DAC_TimerEnable(false);
+	AFSK_FlushFifo();
+	hw_afsk_dac_isr = false;
 	AFSK_TimerEnable(true);
 	setPtt(false); // PTT off
 }

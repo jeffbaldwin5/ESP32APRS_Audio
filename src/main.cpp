@@ -3453,6 +3453,8 @@ int timeHalfSec = 0;
 #define BTN_TEST_MAX_MS 30000 // Unkey after this long, even if the button is stuck
 volatile bool manualBeaconReq = false;
 bool btnTestEnabled = true;
+#define BTN_RESTART_HOLD_MS 2000
+bool btnRestartEnabled = true;
 #endif
 
 void preTransmission()
@@ -3769,6 +3771,9 @@ void setup()
     btnTestEnabled = !(config.rf_en && config.rf_pd_gpio == BTN_TEST_PIN); // Pin is the RF module's PD line
     if (btnTestEnabled)
         pinMode(BTN_TEST_PIN, INPUT_PULLUP);
+    btnRestartEnabled = !(config.rf_en && config.rf_rx_gpio == BTN_RESTART_PIN); // Pin is the RF module's RX line
+    if (btnRestartEnabled)
+        pinMode(BTN_RESTART_PIN, INPUT_PULLUP);
 #endif
 
     // if (config.counter0_enable)
@@ -5289,6 +5294,24 @@ static void handleExtraButtons()
             ModemTxTestStop();
             showDisp = true;
             timeSec = timeHalfSec = millis();
+        }
+    }
+
+    if (btnRestartEnabled)
+    {
+        // History starts as "pressed" so a stuck switch can't cause a reboot loop:
+        // it must be seen released before a press counts.
+        static uint8_t restartHistory = 0xFF;
+        static unsigned long restartDown = 0;
+        if (btnSample(BTN_RESTART_PIN, restartHistory))
+            restartDown = millis();
+        else if ((restartHistory & 0x07) == 0)
+            restartDown = 0;
+        if (restartDown > 0 && millis() - restartDown >= BTN_RESTART_HOLD_MS)
+        {
+            msgBox("RESTART");
+            delay(500);
+            esp_restart();
         }
     }
 }

@@ -11926,12 +11926,19 @@ void handle_about(AsyncWebServerRequest *request)
 			VERSION, VERSION_BUILD);
 		strcat(webString, ota_row);
 		strcat(webString, "<tr><td align=\"right\"><b>Status:</b></td><td><span id='ota_prg'>Ready</span></td></tr>\n");
+// Custom builds: hide the online update button so the stock image can't overwrite
+// this firmware. The element stays in the page so the JS that binds it still works.
+#if defined(TX_TRUE_DAC) || defined(EXTRA_BUTTONS)
+#define OTA_URL_BTN_STYLE " style='display:none'"
+#else
+#define OTA_URL_BTN_STYLE ""
+#endif
 		snprintf(ota_row, sizeof(ota_row),
 			"<tr><td colspan=\"2\" align=\"right\"><div class=\"col-sm-3 col-xs-4\">"
 			"<input type='hidden' id='ota_url' value='%s'>"
 			"<input type='hidden' id='fw_prefix' value='%s'>"
 			"<input type='button' class=\"btn btn-danger\" id=\"check_ver_btn\" value='Check New Version'>"
-			"<input type='button' class=\"btn btn-danger\" id=\"ota_sumbit\" value='Firmware Update'>"
+			"<input type='button' class=\"btn btn-danger\" id=\"ota_sumbit\" value='Firmware Update'" OTA_URL_BTN_STYLE ">"
 			"</div></td></tr>\n",
 			ota_url_buf, FirmwarePrefix);
 		strcat(webString, ota_row);

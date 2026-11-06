@@ -1673,7 +1673,11 @@ void defaultConfig()
     config.mic = 8;
     config.modem_type = 1;
 
+#ifdef CONFIG_IDF_TARGET_ESP32
+    config.adc_atten = 3; // 11 dB: what the ADC actually ran at before the attenuation setting worked
+#else
     config.adc_atten = 0;
+#endif
 
 #ifdef ESP32C3_MINI
     config.rf_tx_gpio = -1;

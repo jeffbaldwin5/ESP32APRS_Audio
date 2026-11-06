@@ -48,6 +48,7 @@
 #endif
 
 #include "modem.h"
+#include "rx_diag.h"
 
 #include "fx25.h"
 
@@ -234,6 +235,8 @@ int IRAM_ATTR RingBuffer_Size(const RingBuffer *rb)
 {
   return rb->count;
 }
+
+volatile struct AfskRxDiag AfskDiag = {32767, -32768, 0, 0, 0};
 
 RingBuffer fifo; // Declare a ring buffer statically (this will be in DRAM, but functions are in IRAM)
 
@@ -469,6 +472,7 @@ adc_continuous_data_t *result = NULL;
 // adc_attenuation_t cfg_adc_atten = ADC_0db;
 #ifdef ADC_SAMPLE
 adc_attenuation_t cfg_adc_atten = ADC_0db;
+static volatile bool adcTimerRunning = false; // sampling ISR timer state, for afskSetADCAtten()
 void afskSetADCAtten(uint8_t val)
 {
   adc_atten = val;
@@ -494,10 +498,23 @@ void afskSetADCAtten(uint8_t val)
   }
   else if (adc_atten == 4)
   {
-    cfg_adc_atten = ADC_ATTENDB_MAX;
+    cfg_adc_atten = ADC_11db; // ADC_ATTENDB_MAX is an enum end marker, not an attenuation; 11 dB is the max
     Vref = 3300;
   }
-  analogSetPinAttenuation(adc_pins[0], cfg_adc_atten);
+  // analogSetPinAttenuation() is ignored by the Arduino core until the pin has been read once,
+  // so at boot the ADC silently ran at the core default (11 dB) whatever was configured.
+  // analogSetAttenuation() sets the default for pins not yet read and reconfigures pins already
+  // in use, including the mV calibration. Pause the sampling ISR while the calibration handle
+  // is replaced so analogReadMilliVolts() never runs against a deleted handle.
+  bool running = adcTimerRunning;
+  if (running)
+  {
+    timerStop(timer_adc);
+    delay(2);
+  }
+  analogSetAttenuation(cfg_adc_atten);
+  if (running)
+    timerStart(timer_adc);
 }
 #else
 adc_atten_t cfg_adc_atten = ADC_ATTEN_DB_0;
@@ -766,6 +783,7 @@ void AFSK_TimerEnable(bool sts)
 #ifdef ADC_SAMPLE
     RingBuffer_IsEmpty(&fifo);
     timerStart(timer_adc);
+    adcTimerRunning = true;
 #else
     //   timerAlarmEnable(timer);
     if (AdcHandle != NULL)
@@ -781,6 +799,7 @@ void AFSK_TimerEnable(bool sts)
   {
 #ifdef ADC_SAMPLE
     timerStop(timer_adc);
+    adcTimerRunning = false;
 #else
     //   timerAlarmDisable(timer);
     if (AdcHandle != NULL)
@@ -1309,7 +1328,7 @@ void AFSK_hw_init(void)
 #ifdef ADC_SAMPLE
   pinMode(15, OUTPUT);
   analogReadResolution(12);
-  analogSetPinAttenuation(adc_pins[0], cfg_adc_atten);
+  analogSetAttenuation(cfg_adc_atten); // see afskSetADCAtten()
   timer_adc = timerBegin(20000000);
   // Attach onTimer function to our timer.
   timerAttachInterrupt(timer_adc, &sample_adc_isr); // Attaches the handler function to the timer
@@ -1317,6 +1336,7 @@ void AFSK_hw_init(void)
   // Repeat the alarm (third parameter) with unlimited count = 0 (fourth parameter).
   timerAlarm(timer_adc, (uint64_t)20000000 / SAMPLERATE, true, 0);
   timerStart(timer_adc);
+  adcTimerRunning = true;
 
 #else
   adc_continue_init();
@@ -1546,6 +1566,8 @@ bool sqlActiveOld = false;
 void AFSK_Poll(bool SA818, bool RFPower)
 {
   fifoSampleCount = fifo.count;  // Diagnostic snapshot
+  if (fifoSampleCount > BUFFER_SIZE)
+    AfskDiag.overflows++; // ISR wrapped the ring buffer over unread samples
   int mV;
   int x = 0;
   int16_t adc = 0;
@@ -1747,6 +1769,10 @@ void AFSK_Poll(bool SA818, bool RFPower)
           bool ret = RingBuffer_Pop(&fifo, &adc);
           if (!ret)
             break;
+          if (adc < AfskDiag.rawMin)
+            AfskDiag.rawMin = adc;
+          if (adc > AfskDiag.rawMax)
+            AfskDiag.rawMax = adc;
           // if (!RingBuffer_Pop(&fifo, &adc))
           //   break;
 
@@ -1785,6 +1811,7 @@ void AFSK_Poll(bool SA818, bool RFPower)
         // portEXIT_CRITICAL_ISR(&timerMux);
         //  Update AGC gain
         update_agc(audio_buffer, BLOCK_SIZE);
+        AfskDiag.blocks++;
 #ifdef ADC_SAMPLE
         offset = tp->avg;
 #else
@@ -1831,6 +1858,7 @@ void AFSK_Poll(bool SA818, bool RFPower)
         else
         {
           tp->cdt = false;
+          AfskDiag.gated++;
         }
         //digitalWrite(15, LOW);
       }

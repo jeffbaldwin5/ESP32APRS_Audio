@@ -27,6 +27,7 @@ along with VP-Digi.  If not, see <http://www.gnu.org/licenses/>.
 
 #include "AFSK.h"
 #include "CRC-CCIT.h"
+#include "rx_diag.h"
 
 struct Ax25ProtoConfig Ax25Config;
 
@@ -140,6 +141,8 @@ struct RxState
 };
 
 static struct RxState rxState[MODEM_MAX_DEMODULATOR_COUNT];
+
+volatile struct Ax25RxDiag Ax25Diag[MODEM_MAX_DEMODULATOR_COUNT];
 
 static uint16_t lastCrc = 0; //CRC of the last received frame. If not 0, a frame was successfully received
 static uint16_t rxMultiplexDelay = 0; //simple delay for decoder multiplexer to avoid receiving the same frame twice
@@ -437,11 +440,12 @@ static void *writeFx25Frame(uint8_t *data, uint16_t size)
 	return ret;
 }
 
-static struct FrameHandle* parseFx25Frame(uint8_t *frame, uint16_t size, uint16_t *crc)
+static struct FrameHandle* parseFx25Frame(uint8_t *frame, uint16_t size, uint16_t *crc, uint16_t mV, bool *dup)
 {
 	struct FrameHandle *h = &rxFrame[rxFrameHead];
 	uint16_t initialRxBufferHead = rxBufferHead;
 	uint8_t tempRxFrameHead = rxFrameHead;
+	*dup = false;
 
 	if(!rxFrameBufferFull)
 	{
@@ -526,11 +530,18 @@ endParseFx25Frame:
 
 		if(Ax25Config.allowNonAprs || (((rxBuffer[(pathEnd + 1) % FRAME_BUFFER_SIZE] == 0x03) && (rxBuffer[(pathEnd + 2) % FRAME_BUFFER_SIZE] == 0xF0))))
 		{
+			if(*crc == lastCrc) //the other demodulator already stored this frame
+			{
+				*dup = true;
+				removeLastFrameFromRxBuffer();
+				return NULL;
+			}
 			h->size = k - 2;
+			h->mVrms = mV; //set before rxFrameHead advances so the reader never sees it unset
 			// Only increment rxFrameHead after successful validation
 			rxFrameHead = tempRxFrameHead + 1;
 			rxFrameHead %= FRAME_MAX_COUNT;
-			if(rxFrameHead == txFrameHead)
+			if(rxFrameHead == rxFrameTail)
 				rxFrameBufferFull = true;
 			return h;
 		}
@@ -651,6 +662,7 @@ void Ax25BitParse(uint8_t bit, uint8_t modem,uint16_t mV)
 			&& (rx->rx != RX_STAGE_FX25_FRAME)
 			&& (NULL != (rx->fx25Mode = (struct Fx25Mode*)Fx25GetModeForTag(rx->tag))))
 	{
+		Ax25Diag[modem].fx25Tags++;
 		rx->rx = RX_STAGE_FX25_FRAME;
 		rx->receivedByte = 0;
 		rx->receivedBitIdx = 0;
@@ -664,13 +676,18 @@ void Ax25BitParse(uint8_t bit, uint8_t modem,uint16_t mV)
 
 		if(rx->rawData == 0x7E) //HDLC flag received
 		{
+			Ax25Diag[modem].flags++;
 			if(rx->rx == RX_STAGE_FRAME) //if we are in frame, this is the end of the frame
 			{
+				if((rx->frameIdx > 0) && (rx->frameIdx < 17))
+					Ax25Diag[modem].shortFrames++;
 				if(rx->frameIdx >= 17) //correct frame must be at least 17 bytes long (source+destination+control+CRC)
 				{
+					Ax25Diag[modem].attempts++;
 					rx->crc ^= 0xFFFF;
 					if((rx->frame[rx->frameIdx - 2] == (rx->crc & 0xFF)) && (rx->frame[rx->frameIdx - 1] == ((rx->crc >> 8) & 0xFF))) //check CRC
 					{
+						Ax25Diag[modem].crcOk++;
 						uint16_t i = 13;
                         //log_d("[%i]%s",rx->frameIdx,rx->frame);
 						//start from 13, which is the SSID of source
@@ -685,6 +702,8 @@ void Ax25BitParse(uint8_t bit, uint8_t modem,uint16_t mV)
 						{                                                       
 
 							rx->frameReceived = 1;
+							if(rx->crc == lastCrc)
+								Ax25Diag[modem].dupes++;
 							rx->frameIdx -= 2; //remove CRC
 							if(rx->crc != lastCrc) //the other decoder has not received this frame yet, so store it in main frame buffer
 							{
@@ -697,6 +716,7 @@ void Ax25BitParse(uint8_t bit, uint8_t modem,uint16_t mV)
 
 								if(!rxFrameBufferFull) //if enough space, store the frame
 								{
+									Ax25Diag[modem].stored++;
 									rxFrame[rxFrameHead].start = rxBufferHead;
 									rxFrame[rxFrameHead].mVrms=mV;
 									ModemGetSignalLevel(modem, &rxFrame[rxFrameHead].peak, &rxFrame[rxFrameHead].valley, &rxFrame[rxFrameHead].level);
@@ -718,10 +738,18 @@ void Ax25BitParse(uint8_t bit, uint8_t modem,uint16_t mV)
 										rxBufferHead %= FRAME_BUFFER_SIZE;
 									}
 								}else{
+									Ax25Diag[modem].bufFull++;
 									log_w("RX frame buffer full");
 								}
 							}
 						}
+						else
+							Ax25Diag[modem].nonAprs++;
+					}
+					else
+					{
+						Ax25Diag[modem].crcFail++;
+						Ax25Diag[modem].lastFailLen = rx->frameIdx;
 					}
 				}
 			}
@@ -740,6 +768,8 @@ void Ax25BitParse(uint8_t bit, uint8_t modem,uint16_t mV)
 		//middle of an actual FX.25 parity/tag block here - safe to check for abort
 		if((rx->rawData & 0x7F) == 0x7F) //received 7 consecutive ones, this is an error
 		{
+			if(rx->frameIdx > 0)
+				Ax25Diag[modem].aborts++;
 			rx->rx = RX_STAGE_IDLE;
 			rx->receivedByte = 0;
 			rx->receivedBitIdx = 0;
@@ -772,10 +802,26 @@ void Ax25BitParse(uint8_t bit, uint8_t modem,uint16_t mV)
 		{
 			uint8_t fixed = 0;
 			bool fecSuccess = Fx25Decode(rx->frame, rx->fx25Mode, &fixed);
+			if(fecSuccess)
+			{
+				Ax25Diag[modem].fx25FecOk++;
+				Ax25Diag[modem].fx25Fixed += fixed;
+			}
 			uint16_t crc;
-			struct FrameHandle *h = parseFx25Frame(rx->frame, rx->frameIdx, &crc);
+			bool dup;
+			struct FrameHandle *h = parseFx25Frame(rx->frame, rx->frameIdx, &crc, mV, &dup);
+			if(dup)
+			{
+				Ax25Diag[modem].fx25Ok++;
+				Ax25Diag[modem].dupes++;
+				rx->frameReceived = 1;
+			}
+			else if(h == NULL)
+				Ax25Diag[modem].fx25Fail++;
 			if(h != NULL)
 			{
+				Ax25Diag[modem].fx25Ok++;
+				Ax25Diag[modem].stored++;
 				rx->frameReceived = 1;
 				ModemGetSignalLevel(modem, &h->peak, &h->valley, &h->level);
 				if(fecSuccess)
@@ -801,6 +847,7 @@ void Ax25BitParse(uint8_t bit, uint8_t modem,uint16_t mV)
 #endif
 		if(rx->frameIdx >= AX25_FRAME_MAX_SIZE) //frame is too long
 		{
+			Ax25Diag[modem].tooLong++;
 			rx->rx = RX_STAGE_IDLE;
 			rx->receivedByte = 0;
 			rx->receivedBitIdx = 0;

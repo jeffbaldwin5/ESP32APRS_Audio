@@ -66,7 +66,7 @@ along with VP-Digi.  If not, see <http://www.gnu.org/licenses/>.
 #define DCD300_TUNE 0.74f
 
 #define N1200 8 // samples per symbol @ fs=9600, oversampling = 38400 Hz
-#define N9600 1 // fs=38400, oversampling = 38400 Hz
+#define N9600 4 // samples per symbol @ fs=38400 (was 1, which made PLL9600_STEP 2^32 -> 0 in int32_t)
 #define N300 32 // fs=9600, oversampling = 38400 Hz
 #define NMAX 32 // keep this value equal to the biggest Nx
 

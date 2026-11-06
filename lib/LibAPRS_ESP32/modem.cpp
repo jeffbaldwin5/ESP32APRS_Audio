@@ -714,12 +714,11 @@ void ModemInit(void)
 
 		if (ModemConfig.flatAudioIn) // when used with flat audio input, use deemphasis and flat modems
 		{
-#ifdef ENABLE_FX25
-			if (Ax25Config.fx25)
-				demodState[0].prefilter = PREFILTER_NONE;
-			else
-#endif
-				demodState[0].prefilter = PREFILTER_DEEMPHASIS;
+			// Always de-emphasis here, FX.25 or not. This used to switch to no filter when FX.25
+			// was on, but afskSetModem() runs ModemInit() before Ax25Init() loads the FX.25
+			// setting, so boot got de-emphasis and only a later re-init got no filter. No filter
+			// also made both demodulators identical, losing the second filtered copy.
+			demodState[0].prefilter = PREFILTER_DEEMPHASIS;
 			demodState[0].bpf.coeffs = (int16_t *)bpf1200Inv;
 			demodState[0].bpf.taps = sizeof(bpf1200Inv) / sizeof(*bpf1200Inv);
 			demodState[0].bpf.gainShift = 15;

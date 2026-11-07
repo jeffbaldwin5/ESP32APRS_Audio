@@ -26,7 +26,9 @@
 
 //-------ESP32---------
 #if defined(CONFIG_IDF_TARGET_ESP32)
+#ifndef ESP32 // the toolchain already defines it
 #define ESP32
+#endif
 #define USE_TDM
 #define USE_PDM
 #endif
